@@ -43,10 +43,12 @@ class MainWindow : public BaseMainWindow
     void new_proj() override;
     void newContext(Context *ctx);
     void open_lpf();
+    void load_config();
     void save_config();
 
   private:
     QAction *actionLoadLPF;
+    QAction *actionLoadConfig;
     QAction *actionSaveConfig;
 };
 

@@ -21,10 +21,12 @@
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <fstream>
+#include <iostream>
 #include <iomanip>
 #include <queue>
 #include <regex>
 #include <streambuf>
+#include "cells.h"
 #include "config.h"
 #include "log.h"
 #include "pio.h"
@@ -435,7 +437,7 @@ std::vector<std::string> get_pll_tiles(Context *ctx, BelId bel)
     return tiles;
 }
 
-void fix_tile_names(Context *ctx, ChipConfig &cc)
+void fix_tile_names(Context *ctx, ChipConfig &cc, bool reverse)
 {
     // Remove the V prefix/suffix on certain tiles if device is a SERDES variant
     if (ctx->args.type == ArchArgs::LFE5U_25F || ctx->args.type == ArchArgs::LFE5U_45F ||
@@ -445,15 +447,25 @@ void fix_tile_names(Context *ctx, ChipConfig &cc)
             std::string newname = tile.first;
             auto cibdcu = tile.first.find("CIB_DCU");
             if (cibdcu != std::string::npos) {
-                // Add the V
-                if (newname.at(cibdcu - 1) != 'V')
-                    newname.insert(cibdcu, 1, 'V');
+                if (!reverse) {
+                    // Add the V
+                    if (newname.at(cibdcu - 1) != 'V')
+                        newname.insert(cibdcu, 1, 'V');
+                } else if (newname.at(cibdcu - 1) == 'V') {
+                    newname.resize(newname.size()-1);
+                }
                 tiletype_xform[tile.first] = newname;
-            } else if (boost::ends_with(tile.first, "BMID_0H")) {
+            } else if (boost::ends_with(tile.first, "BMID_0H") && reverse == false) {
                 newname.back() = 'V';
                 tiletype_xform[tile.first] = newname;
-            } else if (boost::ends_with(tile.first, "BMID_2")) {
+            } else if (boost::ends_with(tile.first, "BMID_2") && reverse == false) {
                 newname.push_back('V');
+                tiletype_xform[tile.first] = newname;
+            } else if (boost::ends_with(tile.first, "BMID_0V") && reverse == true) {
+                newname.back() = 'H';
+                tiletype_xform[tile.first] = newname;
+            } else if (boost::ends_with(tile.first, "BMID_2V") && reverse == true) {
+                newname.resize(newname.size()-1);
                 tiletype_xform[tile.first] = newname;
             }
         }
@@ -565,6 +577,128 @@ std::string intstr_or_default(const std::unordered_map<IdString, Property> &ct, 
             return std::to_string(found->second.as_int64());
     }
 };
+
+void read_bitstream(Context *ctx, std::string text_config_file)
+{
+    ChipConfig cc;
+
+    std::ifstream config_file(text_config_file);
+    if (!config_file) {
+        log_error("failed to open base config file '%s'\n", text_config_file.c_str());
+        return;
+    }
+
+    config_file >> cc;
+
+    ChipInfoPOD const *chip_info = ctx->chip_info;
+
+    std::unordered_map<std::string, Location> reverseLoc;
+    std::unordered_map<std::string, IdString> tileType;
+
+    for (int16_t col = 0; col < chip_info->width; col++)
+        for (int16_t row = 0; row < chip_info->height; row++)
+        {
+            auto p = row * chip_info->width + col;
+            auto &tileloc = chip_info->tile_info[p];
+            for (int i = 0; i < tileloc.num_tiles; i++) {
+                reverseLoc[tileloc.tile_names[i].name.get()] = {col, row};
+            }
+            for (int i = 0; i < tileloc.num_tiles; i++) {
+                tileType[tileloc.tile_names[i].name.get()] = 
+                    ctx->id(chip_info->tiletype_names[tileloc.tile_names[i].type_idx].get());
+            }
+        }
+
+    log_info("reverseLoc.size() = %lu\n", reverseLoc.size());
+    auto it = reverseLoc.begin();
+    for (int i=0; i<20; i++, it++)
+        log_info("  %s(%d, %d)\n", it->first.c_str(), it->second.x, it->second.y);
+
+    log_info("cc.tiles.size() = %lu\n", cc.tiles.size());
+
+    //chip_info->locations[chip_info->location_type[p]]
+    //auto type = locInfo(pip)->pip_data[pip.index].tile_type;
+    // , chip_info->tiletype_names[type]};
+
+    // Restore tile names
+    fix_tile_names(ctx, cc, true);
+
+    auto id_TRELLIS_SLICE = ctx->id("TRELLIS_SLICE");
+    auto id_PLC2 = ctx->id("PLC2");
+
+    int ii = -1;
+
+    for (auto &tnametile : cc.tiles) {
+        ii++;
+        Location loc = reverseLoc[tnametile.first];
+        IdString type = tileType[tnametile.first];
+
+        if (type != id_PLC2)
+            continue;
+
+        //auto &tile = tnametile.second;
+        // if (ii < 400)
+        //     log_info("  %s(%d, %d)\n",
+        //         tnametile.first.c_str(), loc.x, loc.y);
+
+
+        auto p = loc.y * chip_info->width + loc.x;
+        LocationTypePOD const& locType = chip_info->locations[chip_info->location_type[p]];
+        BelInfoPOD const *belData = locType.bel_data.get();
+
+        // auto &tileloc = chip_info->tile_info[p];
+        // for (int i = 0; i < tileloc.num_tiles; i++) {
+        //     log_info("    - %d: %s / %s\n", i,
+        //         chip_info->tiletype_names[tileloc.tile_names[i].type_idx].get(),
+        //         tileloc.tile_names[i].name.get());
+        // }
+
+        for (int i=0; i<locType.num_bels; i++) {
+            BelId bel;
+            bel.location = loc;
+            bel.index = i;
+
+            IdString cellType = ctx->getBelType(bel);
+
+            // log_info("    %d: %s\n", i, cellType.c_str(ctx));
+
+
+            if (cellType == id_TRELLIS_SLICE) {
+
+                std::string slice = belData[i].name.get();
+
+                std::unique_ptr<CellInfo> cell = create_ecp5_cell(ctx, id_TRELLIS_SLICE, "");
+                CellInfo *pCell = cell.get();
+                ctx->cells[cell->name] = std::move(cell);
+
+                int idx = ctx->getBelFlatIndex(bel);
+                if (ctx->bel_to_cell.at(idx) == nullptr)
+                    ctx->bindBel(bel, pCell, STRENGTH_WEAK);
+                else
+                    log_warning("      already occupied\n");
+
+                /*
+                std::string tname = ctx->getTileByTypeAndLocation(bel.location.y, bel.location.x, "PLC2");
+                std::string slice = ctx->locInfo(bel)->bel_data[bel.index].name.get();
+                int lut0_init = int_or_default(ci->params, ctx->id("LUT0_INITVAL"));
+                int lut1_init = int_or_default(ci->params, ctx->id("LUT1_INITVAL"));
+                cc.tiles[tname].add_word(slice + ".K0.INIT", int_to_bitvector(lut0_init, 16));
+                cc.tiles[tname].add_word(slice + ".K1.INIT", int_to_bitvector(lut1_init, 16));
+                cc.tiles[tname].add_enum(slice + ".MODE", str_or_default(ci->params, ctx->id("MODE"), "LOGIC"));
+                cc.tiles[tname].add_enum(slice + ".GSR", str_or_default(ci->params, ctx->id("GSR"), "ENABLED"));
+                cc.tiles[tname].add_enum(slice + ".REG0.SD", intstr_or_default(ci->params, ctx->id("REG0_SD"), "0"));
+                cc.tiles[tname].add_enum(slice + ".REG1.SD", intstr_or_default(ci->params, ctx->id("REG1_SD"), "0"));
+                cc.tiles[tname].add_enum(slice + ".REG0.REGSET",
+                                         str_or_default(ci->params, ctx->id("REG0_REGSET"), "RESET"));
+                cc.tiles[tname].add_enum(slice + ".REG1.REGSET",
+                                         str_or_default(ci->params, ctx->id("REG1_REGSET"), "RESET"));
+                cc.tiles[tname].add_enum(slice + ".CEMUX", str_or_default(ci->params, ctx->id("CEMUX"), "1"));
+                */
+            }
+        }
+    }
+}
+
 
 void write_bitstream(Context *ctx, std::string base_config_file, std::string text_config_file)
 {
@@ -1444,7 +1578,7 @@ void write_bitstream(Context *ctx, std::string base_config_file, std::string tex
     }
 
     // Fixup tile names
-    fix_tile_names(ctx, cc);
+    fix_tile_names(ctx, cc, false);
     // Configure chip
     if (!text_config_file.empty()) {
         std::ofstream out_config(text_config_file);

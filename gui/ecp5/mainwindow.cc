@@ -60,6 +60,12 @@ void MainWindow::createMenu()
     actionLoadLPF->setEnabled(false);
     connect(actionLoadLPF, &QAction::triggered, this, &MainWindow::open_lpf);
 
+    actionLoadConfig = new QAction("Load Bitstream", this);
+    actionLoadConfig->setIcon(QIcon(":/icons/resources/open_lpf.png"));
+    actionLoadConfig->setStatusTip("Load Bitstream config file");
+    actionLoadConfig->setEnabled(true);
+    connect(actionLoadConfig, &QAction::triggered, this, &MainWindow::load_config);
+
     actionSaveConfig = new QAction("Save Bitstream", this);
     actionSaveConfig->setIcon(QIcon(":/icons/resources/save_config.png"));
     actionSaveConfig->setStatusTip("Save Bitstream config file");
@@ -69,10 +75,12 @@ void MainWindow::createMenu()
     // Add actions in menus
     mainActionBar->addSeparator();
     mainActionBar->addAction(actionLoadLPF);
+    mainActionBar->addAction(actionLoadConfig);
     mainActionBar->addAction(actionSaveConfig);
 
     menuDesign->addSeparator();
     menuDesign->addAction(actionLoadLPF);
+    menuDesign->addAction(actionLoadConfig);
     menuDesign->addAction(actionSaveConfig);
 }
 
@@ -147,6 +155,19 @@ void MainWindow::open_lpf()
     }
 }
 
+void MainWindow::load_config()
+{
+    QString fileName = QFileDialog::getOpenFileName(this, QString("Load Bitstream"), QString(), QString("*.config"));
+    if (!fileName.isEmpty()) {
+        std::string fn = fileName.toStdString();
+        actionLoadConfig->setEnabled(false);
+        read_bitstream(ctx.get(), fileName.toStdString());
+        Q_EMIT updateTreeView();
+        log("Loading Bitstream successful.\n");
+        actionLoadConfig->setEnabled(true);
+    }
+}
+
 void MainWindow::save_config()
 {
     QString fileName = QFileDialog::getSaveFileName(this, QString("Save Bitstream"), QString(), QString("*.config"));
@@ -161,13 +182,17 @@ void MainWindow::save_config()
 void MainWindow::onDisableActions()
 {
     actionLoadLPF->setEnabled(false);
+    actionLoadConfig->setEnabled(true);
     actionSaveConfig->setEnabled(false);
 }
 
 void MainWindow::onUpdateActions()
 {
     if (ctx->settings.find(ctx->id("pack")) == ctx->settings.end())
+    {
         actionLoadLPF->setEnabled(true);
+        actionLoadConfig->setEnabled(true);
+    }
     if (ctx->settings.find(ctx->id("route")) != ctx->settings.end())
         actionSaveConfig->setEnabled(true);
 }
