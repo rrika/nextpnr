@@ -9,6 +9,8 @@ readonly_wrapper<Context, decltype(&Context::hierarchy), &Context::hierarchy, wr
         ctx_cls, "hierarchy");
 readwrite_wrapper<Context, decltype(&Context::top_module), &Context::top_module, conv_to_str<IdString>,
                   conv_from_str<IdString>>::def_wrap(ctx_cls, "top_module");
+readonly_wrapper<Context, decltype(&Context::region), &Context::region, wrap_context<RegionMap &>>::def_wrap(ctx_cls,
+                                                                                                             "region");
 
 fn_wrapper_1a<Context, decltype(&Context::getNetByAlias), &Context::getNetByAlias, deref_and_wrap<NetInfo>,
               conv_from_str<IdString>>::def_wrap(ctx_cls, "getNetByAlias");
@@ -40,6 +42,10 @@ fn_wrapper_2a_v<Context, decltype(&Context::copyBelPorts), &Context::copyBelPort
 
 fn_wrapper_1a<Context, decltype(&Context::getBelType), &Context::getBelType, conv_to_str<IdString>,
               conv_from_str<BelId>>::def_wrap(ctx_cls, "getBelType");
+fn_wrapper_1a<Context, decltype(&Context::getBelLocation), &Context::getBelLocation, pass_through<Loc>,
+              conv_from_str<BelId>>::def_wrap(ctx_cls, "getBelLocation");
+fn_wrapper_1a<Context, decltype(&Context::getBelByLocation), &Context::getBelByLocation, conv_to_str<BelId>,
+              pass_through<Loc>>::def_wrap(ctx_cls, "getBelByLocation");
 fn_wrapper_1a<Context, decltype(&Context::checkBelAvail), &Context::checkBelAvail, pass_through<bool>,
               conv_from_str<BelId>>::def_wrap(ctx_cls, "checkBelAvail");
 fn_wrapper_1a<Context, decltype(&Context::getBelChecksum), &Context::getBelChecksum, pass_through<uint32_t>,
@@ -54,6 +60,13 @@ fn_wrapper_1a<Context, decltype(&Context::getConflictingBelCell), &Context::getC
               deref_and_wrap<CellInfo>, conv_from_str<BelId>>::def_wrap(ctx_cls, "getConflictingBelCell");
 fn_wrapper_0a<Context, decltype(&Context::getBels), &Context::getBels, wrap_context<BelRange>>::def_wrap(ctx_cls,
                                                                                                          "getBels");
+
+fn_wrapper_2a<Context, decltype(&Context::isValidBelForCell), &Context::isValidBelForCell, pass_through<bool>,
+              addr_and_unwrap<CellInfo>, conv_from_str<BelId>>::def_wrap(ctx_cls, "isValidBelForCell");
+fn_wrapper_1a<Context, decltype(&Context::isBelLocationValid), &Context::isBelLocationValid, pass_through<bool>,
+              conv_from_str<BelId>>::def_wrap(ctx_cls, "isBelLocationValid");
+fn_wrapper_1a<Context, decltype(&Context::getBelGlobalBuf), &Context::getBelGlobalBuf, pass_through<bool>,
+              conv_from_str<BelId>>::def_wrap(ctx_cls, "getBelGlobalBuf");
 
 fn_wrapper_2a<Context, decltype(&Context::getBelPinWire), &Context::getBelPinWire, conv_to_str<WireId>,
               conv_from_str<BelId>, conv_from_str<IdString>>::def_wrap(ctx_cls, "getBelPinWire");

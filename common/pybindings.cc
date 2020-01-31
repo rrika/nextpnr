@@ -81,6 +81,23 @@ template <> struct string_converter<PortRef &>
     }
 };
 
+template <> struct string_converter<CellInfo *&>
+{
+    inline CellInfo from_str(Context *ctx, std::string name)
+    {
+        NPNR_ASSERT_FALSE("CellInfo* from_str not implemented");
+    }
+
+    inline std::string to_str(Context *ctx, CellInfo *const &pr) { return "<CellInfo>"; }
+};
+
+template <> struct string_converter<Region &>
+{
+    inline CellInfo from_str(Context *ctx, std::string name) { NPNR_ASSERT_FALSE("Region from_str not implemented"); }
+
+    inline std::string to_str(Context *ctx, CellInfo *const &pr) { return "<Region>"; }
+};
+
 template <> struct string_converter<Property>
 {
     inline Property from_str(Context *ctx, std::string s) { return Property::from_string(s); }
@@ -141,7 +158,6 @@ BOOST_PYTHON_MODULE(MODULE_NAME)
     typedef std::unordered_map<IdString, Property> AttrMap;
     typedef std::unordered_map<IdString, PortInfo> PortMap;
     typedef std::unordered_map<IdString, IdString> IdIdMap;
-    typedef std::unordered_map<IdString, std::unique_ptr<Region>> RegionMap;
 
     class_<BaseCtx, BaseCtx *, boost::noncopyable>("BaseCtx", no_init);
 
@@ -156,6 +172,8 @@ BOOST_PYTHON_MODULE(MODULE_NAME)
                       conv_from_str<IdString>>::def_wrap(ci_cls, "name");
     readwrite_wrapper<CellInfo &, decltype(&CellInfo::type), &CellInfo::type, conv_to_str<IdString>,
                       conv_from_str<IdString>>::def_wrap(ci_cls, "type");
+    readwrite_wrapper<CellInfo &, decltype(&CellInfo::udata), &CellInfo::udata, pass_through<int>,
+                      pass_through<int>>::def_wrap(ci_cls, "udata");
     readonly_wrapper<CellInfo &, decltype(&CellInfo::attrs), &CellInfo::attrs, wrap_context<AttrMap &>>::def_wrap(
             ci_cls, "attrs");
     readonly_wrapper<CellInfo &, decltype(&CellInfo::params), &CellInfo::params, wrap_context<AttrMap &>>::def_wrap(
@@ -168,6 +186,24 @@ BOOST_PYTHON_MODULE(MODULE_NAME)
                       pass_through<PlaceStrength>>::def_wrap(ci_cls, "belStrength");
     readonly_wrapper<CellInfo &, decltype(&CellInfo::pins), &CellInfo::pins, wrap_context<IdIdMap &>>::def_wrap(ci_cls,
                                                                                                                 "pins");
+
+    typedef std::vector<CellInfo *> CellInfoVector;
+
+    readwrite_wrapper<CellInfo &, decltype(&CellInfo::constr_parent), &CellInfo::constr_parent,
+                      deref_and_wrap<CellInfo>, addr_and_unwrap<CellInfo>>::def_wrap(ci_cls, "constr_parent");
+    readwrite_wrapper<CellInfo &, decltype(&CellInfo::constr_x), &CellInfo::constr_x, pass_through<int>,
+                      pass_through<int>>::def_wrap(ci_cls, "constr_x");
+    readwrite_wrapper<CellInfo &, decltype(&CellInfo::constr_y), &CellInfo::constr_y, pass_through<int>,
+                      pass_through<int>>::def_wrap(ci_cls, "constr_y");
+    readwrite_wrapper<CellInfo &, decltype(&CellInfo::constr_z), &CellInfo::constr_z, pass_through<int>,
+                      pass_through<int>>::def_wrap(ci_cls, "constr_z");
+    readwrite_wrapper<CellInfo &, decltype(&CellInfo::constr_abs_z), &CellInfo::constr_abs_z, pass_through<int>,
+                      pass_through<int>>::def_wrap(ci_cls, "constr_abs_z");
+    readonly_wrapper<CellInfo &, decltype(&CellInfo::constr_children), &CellInfo::constr_children,
+                     wrap_context<CellInfoVector &>>::def_wrap(ci_cls, "constr_children");
+
+    readwrite_wrapper<CellInfo &, decltype(&CellInfo::region), &CellInfo::region, deref_and_wrap<Region>,
+                      addr_and_unwrap<Region>>::def_wrap(ci_cls, "region");
 
     fn_wrapper_1a_v<CellInfo &, decltype(&CellInfo::addInput), &CellInfo::addInput, conv_from_str<IdString>>::def_wrap(
             ci_cls, "addInput");
@@ -259,9 +295,9 @@ BOOST_PYTHON_MODULE(MODULE_NAME)
     WRAP_MAP(PortMap, wrap_context<PortInfo &>, "PortMap");
     WRAP_MAP(IdIdMap, conv_to_str<IdString>, "IdIdMap");
     WRAP_MAP(WireMap, wrap_context<PipMap &>, "WireMap");
-    WRAP_MAP_UPTR(RegionMap, "RegionMap");
 
     WRAP_VECTOR(PortRefVector, wrap_context<PortRef &>);
+    WRAP_VECTOR(CellInfoVector, deref_and_wrap<CellInfo>);
 
     arch_wrap_python();
 }
