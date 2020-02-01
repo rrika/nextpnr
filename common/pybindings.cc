@@ -25,6 +25,7 @@
 #include "json_frontend.h"
 #include "log.h"
 #include "nextpnr.h"
+#include "timing.h"
 
 #include <boost/filesystem.hpp>
 #include <fstream>
@@ -62,6 +63,14 @@ Context *load_design_shim(std::string filename, ArchArgs args)
     Context *d = new Context(args);
     parse_json_shim(filename, *d);
     return d;
+}
+
+// Create a new Chip and load design from json file
+PythonConversion::ContextualWrapper<NetCriticalityMap &> get_criticalities_shim(Context *ctx)
+{
+    auto *ncm = new NetCriticalityMap(); // this object will leak, doing it properly is a pain
+    get_criticalities(ctx, ncm);
+    return PythonConversion::ContextualWrapper<NetCriticalityMap &>(ctx, *ncm);
 }
 
 void translate_assertfail(const assertion_failure &e)
@@ -260,6 +269,23 @@ BOOST_PYTHON_MODULE(MODULE_NAME)
 
     def("parse_json", parse_json_shim);
     def("load_design", load_design_shim, return_value_policy<manage_new_object>());
+    def("get_criticalities", get_criticalities_shim);
+
+    auto nci_cls = class_<ContextualWrapper<NetCriticalityInfo &>>("NetCriticalityInfo", no_init);
+    readonly_wrapper<NetCriticalityInfo &, decltype(&NetCriticalityInfo::slack), &NetCriticalityInfo::slack,
+      pass_through<decltype(NetCriticalityInfo::slack)>>::def_wrap(nci_cls, "slack");
+    readonly_wrapper<NetCriticalityInfo &, decltype(&NetCriticalityInfo::criticality), &NetCriticalityInfo::criticality,
+      pass_through<decltype(NetCriticalityInfo::criticality)>>::def_wrap(nci_cls, "criticality");
+
+    readwrite_wrapper<NetCriticalityInfo &, decltype(&NetCriticalityInfo::max_path_length), &NetCriticalityInfo::max_path_length,
+      pass_through<unsigned>,
+                      pass_through<unsigned>>::def_wrap(nci_cls, "max_path_length");
+    readwrite_wrapper<NetCriticalityInfo &, decltype(&NetCriticalityInfo::cd_worst_slack), &NetCriticalityInfo::cd_worst_slack,
+      pass_through<delay_t>,
+                      pass_through<delay_t>>::def_wrap(nci_cls, "cd_worst_slack");
+
+
+
 
     auto region_cls = class_<ContextualWrapper<Region &>>("Region", no_init);
     readwrite_wrapper<Region &, decltype(&Region::name), &Region::name, conv_to_str<IdString>,
@@ -295,6 +321,7 @@ BOOST_PYTHON_MODULE(MODULE_NAME)
     WRAP_MAP(PortMap, wrap_context<PortInfo &>, "PortMap");
     WRAP_MAP(IdIdMap, conv_to_str<IdString>, "IdIdMap");
     WRAP_MAP(WireMap, wrap_context<PipMap &>, "WireMap");
+    WRAP_MAP(NetCriticalityMap, wrap_context<NetCriticalityInfo &>, "NetCriticalityMap");
 
     WRAP_VECTOR(PortRefVector, wrap_context<PortRef &>);
     WRAP_VECTOR(CellInfoVector, deref_and_wrap<CellInfo>);
