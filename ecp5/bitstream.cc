@@ -26,6 +26,7 @@
 #include <queue>
 #include <regex>
 #include <streambuf>
+#include <tuple>
 #include "cells.h"
 #include "config.h"
 #include "log.h"
@@ -67,6 +68,55 @@ static std::string get_trellis_wirename(Context *ctx, Location loc, WireId wire)
     if (wire.location.x < loc.x)
         rel_prefix += "W" + std::to_string(loc.x - wire.location.x);
     return rel_prefix + "_" + basename;
+}
+
+static std::pair<Location, int32_t> parse_trellis_wirename(
+    Context *ctx,
+    const LocationTypePOD *locType,
+    std::string& relname)
+{
+    if (relname.size() == 0)
+        return {};
+
+    char direction = relname[0];
+    char *p_end = const_cast<char*>(relname.c_str()+1);
+    int distance = std::strtol(relname.c_str()+1, &p_end, 10);
+    std::string basename;
+    if (*p_end == '_')
+        basename = std::string(p_end+1, &*relname.end());
+    else {
+        basename = relname;
+        direction = '\0';
+        distance = 0;
+    }
+
+    Location loc;
+    loc.x = 0;
+    loc.y = 0;
+    if (direction == 'N')
+        loc.y = -distance;
+    else if (direction == 'E')
+        loc.x = distance;
+    else if (direction == 'S')
+        loc.y = distance;
+    else if (direction == 'W')
+        loc.x = -distance;
+
+    printf("split %s to %c %d %s\n",
+        relname.c_str(),
+        direction,
+        distance,
+        basename.c_str());
+
+    auto num_wires = locType->num_wires;
+    auto *wire_data = &*locType->wire_data;
+    int32_t wireIndex;
+    for (wireIndex=0; wireIndex < num_wires; wireIndex++)
+    {
+        if (basename == std::string(wire_data[wireIndex].name.get()))
+            return {loc, wireIndex};
+    }
+    return {loc, -1};
 }
 
 static std::vector<bool> int_to_bitvector(int val, int size)
@@ -627,6 +677,179 @@ void read_bitstream(Context *ctx, std::string text_config_file)
     auto id_PLC2 = ctx->id("PLC2");
 
     int ii = -1;
+
+    std::map<
+        std::pair<const LocationTypePOD*, std::string>,
+        std::pair<Location, int32_t>
+    > wireCache;
+
+    auto wireid_from_trellis_wirename = [&](
+        const LocationTypePOD* locType,
+        std::string name)
+        -> std::pair<Location, int32_t>
+    {
+        auto key = std::make_pair(locType, name);
+        auto insertResult = wireCache.insert({key, {}});
+        if (insertResult.second)
+            return insertResult.first->second = parse_trellis_wirename(
+                ctx, locType, name);
+        else {
+            auto loc_index = insertResult.first->second;
+            printf("recalling %s to be %d %d %d\n",
+                name.c_str(),
+                loc_index.first.x,
+                loc_index.first.y,
+                loc_index.second);
+            return loc_index;
+        }
+    };
+
+    std::map<std::tuple<
+        const LocationTypePOD*,
+        Location,
+        int32_t,
+        Location,
+        int32_t
+    >, int32_t> pipCache;
+
+    auto pipid_from_trellis_wirenames = [&](
+        Location loc,
+        std::string source,
+        std::string sink) -> std::tuple<WireId, PipId, WireId>
+    {
+        PipId pip;
+        pip.location = loc;
+        pip.index = -1;
+        const LocationTypePOD* locType = ctx->locInfo(pip);
+
+        auto relSourceWire = wireid_from_trellis_wirename(locType, source);
+        auto relSinkWire = wireid_from_trellis_wirename(locType, sink);
+
+        auto key = std::make_tuple(
+            locType,
+            relSourceWire.first,
+            relSourceWire.second,
+            relSinkWire.first,
+            relSinkWire.second
+        );
+
+        printf("look for pip (%d,%d,%d) -> (%d,%d,%d)\n",
+            relSourceWire.first.x,
+            relSourceWire.first.y,
+            relSourceWire.second,
+            relSinkWire.first.x,
+            relSinkWire.first.y,
+            relSinkWire.second
+        );
+        auto insertResult = pipCache.insert({key, -1});
+        if (insertResult.second) {
+            for (int i=0; i < locType->num_pips; i++) {
+                auto pipInfo = locType->pip_data[i];
+                if (
+                    pipInfo.src_idx == relSourceWire.second &&
+                    pipInfo.dst_idx == relSinkWire.second
+                )
+                    printf(" comparing    (%d,%d,%d) -> (%d,%d,%d)\n",
+                        pipInfo.rel_src_loc.x,
+                        pipInfo.rel_src_loc.y,
+                        pipInfo.src_idx,
+                        pipInfo.rel_dst_loc.x,
+                        pipInfo.rel_dst_loc.y,
+                        pipInfo.dst_idx
+                    );
+                if (
+                    pipInfo.rel_src_loc.x == relSourceWire.first.x &&
+                    pipInfo.rel_src_loc.y == relSourceWire.first.y &&
+                    pipInfo.src_idx == relSourceWire.second &&
+                    pipInfo.rel_dst_loc.x == relSinkWire.first.x &&
+                    pipInfo.rel_dst_loc.y == relSinkWire.first.y &&
+                    pipInfo.dst_idx == relSinkWire.second
+                ) {
+                    pip.index = insertResult.first->second = i;
+                    break;
+                }
+            }
+        } else
+            pip.index = insertResult.first->second;
+
+        printf(" ok pip.index = %d\n", pip.index);
+
+        WireId sourceWire;
+        WireId sinkWire;
+        sourceWire.location = loc + relSourceWire.first;
+        sourceWire.index = relSourceWire.second;
+        sinkWire.location = loc + relSinkWire.first;
+        sinkWire.index = relSinkWire.second;
+
+        return std::make_tuple(sourceWire, pip, sinkWire);
+    };
+
+    std::vector<std::tuple<WireId, PipId, WireId>> arcs;
+    for (auto &tnametile: cc.tiles) {
+        Location loc = reverseLoc[tnametile.first];
+        for (auto &arc: tnametile.second.carcs)
+        {
+            printf("%s %s %s\n",
+                tnametile.first.c_str(),
+                arc.source.c_str(),
+                arc.sink.c_str());
+
+            auto source_pip_sink = pipid_from_trellis_wirenames(loc, arc.source, arc.sink);
+            auto sourceWire = std::get<0>(source_pip_sink);
+            auto pipId      = std::get<1>(source_pip_sink);
+            auto sinkWire   = std::get<2>(source_pip_sink);
+
+            printf("pip(%d,%d,%d) wire(%d,%d,%d) -> wire(%d,%d,%d)\n",
+                pipId.location.x,
+                pipId.location.y,
+                pipId.index,
+                sourceWire.location.x,
+                sourceWire.location.y,
+                sourceWire.index,
+                sinkWire.location.x,
+                sinkWire.location.y,
+                sinkWire.index
+            );
+            if (sourceWire.index != -1 && pipId.index != -1 && sinkWire.index != -1)
+                arcs.push_back(source_pip_sink);
+        }
+    }
+    
+    std::map<WireId, std::pair<WireId, PipId>> upstreamWire;
+    for (auto source_pip_sink: arcs) {
+        auto source = std::get<0>(source_pip_sink);
+        auto pip    = std::get<1>(source_pip_sink);
+        auto sink   = std::get<2>(source_pip_sink);
+        upstreamWire[sink] = std::make_pair(source, pip);
+    }
+
+    std::map<WireId, NetInfo*> nets;
+    std::function<NetInfo*(WireId)> netForWire = [&](WireId wireId) -> NetInfo* {
+        {
+            auto it = nets.find(wireId);
+            if (it != nets.end())
+                return it->second;
+        }
+
+        NetInfo *net = nullptr;
+        auto it = upstreamWire.find(wireId);
+        if (it == upstreamWire.end()) {
+            net = ctx->createNet(
+                ctx->getWireName(wireId));
+        } else {
+            auto prevWire = it->second.first;
+            net = netForWire(prevWire);
+        }
+        auto pip = it->second.second;
+        if (ctx->checkPipAvail(pip))
+            ctx->bindPip(pip, net, PlaceStrength::STRENGTH_WEAK);
+        nets[wireId] = net;
+        return net;
+    };
+
+    for (auto source_pip_sink: arcs) {
+        netForWire(std::get<2>(source_pip_sink));
+    }
 
     for (auto &tnametile : cc.tiles) {
         ii++;

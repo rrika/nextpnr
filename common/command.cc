@@ -123,6 +123,7 @@ po::options_description CommandHandler::getGeneralOptions()
 #endif
     general.add_options()("json", po::value<std::string>(), "JSON design file to ingest");
     general.add_options()("write", po::value<std::string>(), "JSON design file to write");
+    general.add_options()("load-config", po::value<std::string>(), "config to load instead of JSON design file");
     general.add_options()("seed", po::value<int>(), "seed value for random number generator");
     general.add_options()("randomize-seed,r", "randomize seed value for random number generator");
 
@@ -307,6 +308,10 @@ int CommandHandler::executeMain(std::unique_ptr<Context> ctx)
             log_error("Loading design failed.\n");
 
         customAfterLoad(ctx.get());
+    } else if (vm.count("load-config")) {
+        std::string filename = vm["load-config"].as<std::string>();
+        extern void read_bitstream(Context *ctx, std::string text_config_file);
+        read_bitstream(ctx.get(), filename);
     }
 
 #ifndef NO_PYTHON
