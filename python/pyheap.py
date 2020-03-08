@@ -63,6 +63,7 @@ cfg.alpha = 0.1
 cfg.criticalityExponent = 2
 cfg.timingWeight = 10
 cfg.timing_driven = False
+cfg.solverTolerance = 1e-5
 
 availableBels = {}
 net_crit = {}
@@ -142,10 +143,10 @@ class EquationSystem:
     def add_rhs(self, row, val):
         self.rhs[row] += val
 
-    def solve(self, x):
+    def solve(self, x, tolerance=1e-5):
         A = csc_matrix((self.Aval, (self.Arow, self.Acol)),
             shape=(self.rows, self.cols)).toarray()
-        x = cg(A, self.rhs, tol=1e-5, x0=x)
+        x = cg(A, self.rhs, tol=tolerance, x0=x)
         return x
 
 def place():
@@ -628,7 +629,7 @@ def solve_equations(es, axis):
     else:
         vals = [cell_locs[cell.name].y for cell in solve_cells]
 
-    vals, what = es.solve(vals)
+    vals, what = es.solve(vals, cfg.solverTolerance)
 
     for solve_cell, val in zip(solve_cells, vals):
         cell_loc = cell_locs[solve_cell.name]

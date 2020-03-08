@@ -68,7 +68,10 @@ class SAPlacer
         int x0 = 0, x1 = 0, y0 = 0, y1 = 0;
         // Number of cells at each extremity
         int nx0 = 0, nx1 = 0, ny0 = 0, ny1 = 0;
-        wirelen_t hpwl() const { return wirelen_t((x1 - x0) + (y1 - y0)); }
+        wirelen_t hpwl(const Placer1Cfg &cfg) const
+        {
+            return wirelen_t(cfg.hpwl_scale_x * (x1 - x0) + cfg.hpwl_scale_y * (y1 - y0));
+        }
     };
 
   public:
@@ -609,9 +612,10 @@ class SAPlacer
         std::vector<std::pair<CellInfo *, BelId>> dest_bels;
         double delta = 0;
         moveChange.reset(this);
+#if 0
         if (ctx->debug)
             log_info("finding cells for chain swap %s\n", cell->name.c_str(ctx));
-
+#endif
         Loc baseLoc = ctx->getBelLocation(cell->bel);
         discover_chain(baseLoc, cell, cell_rel);
         Loc newBaseLoc = ctx->getBelLocation(newBase);
@@ -634,8 +638,10 @@ class SAPlacer
                 return false;
             dest_bels.emplace_back(std::make_pair(cr.first, targetBel));
         }
+#if 0
         if (ctx->debug)
             log_info("trying chain swap %s\n", cell->name.c_str(ctx));
+#endif
         // <cell, oldBel>
         for (const auto &db : dest_bels) {
             BelId oldBel = swap_cell_bels(db.first, db.second);
@@ -661,8 +667,10 @@ class SAPlacer
         // SA acceptance criterea
         if (delta < 0 || (temp > 1e-9 && (ctx->rng() / float(0x3fffffff)) <= std::exp(-delta / temp))) {
             n_accept++;
+#if 0
             if (ctx->debug)
                 log_info("accepted chain swap %s\n", cell->name.c_str(ctx));
+#endif
         } else {
             goto swap_fail;
         }
@@ -684,8 +692,10 @@ class SAPlacer
 
         int dx = diameter, dy = diameter;
         if (cell->region != nullptr && cell->region->constr_bels) {
-            dx = std::min(diameter, (region_bounds[cell->region->name].x1 - region_bounds[cell->region->name].x0) + 1);
-            dy = std::min(diameter, (region_bounds[cell->region->name].y1 - region_bounds[cell->region->name].y0) + 1);
+            dx = std::min(cfg.hpwl_scale_x * diameter,
+                          (region_bounds[cell->region->name].x1 - region_bounds[cell->region->name].x0) + 1);
+            dy = std::min(cfg.hpwl_scale_y * diameter,
+                          (region_bounds[cell->region->name].y1 - region_bounds[cell->region->name].y0) + 1);
             // Clamp location to within bounds
             curr_loc.x = std::max(region_bounds[cell->region->name].x0, curr_loc.x);
             curr_loc.x = std::min(region_bounds[cell->region->name].x1, curr_loc.x);
@@ -815,7 +825,7 @@ class SAPlacer
     {
         wirelen_t cost = 0;
         for (const auto &net : net_bounds)
-            cost += net.hpwl();
+            cost += net.hpwl(cfg);
         return cost;
     }
 
@@ -1056,10 +1066,10 @@ class SAPlacer
         }
 
         for (const auto &bc : md.bounds_changed_nets_x)
-            md.wirelen_delta += md.new_net_bounds[bc].hpwl() - net_bounds[bc].hpwl();
+            md.wirelen_delta += md.new_net_bounds[bc].hpwl(cfg) - net_bounds[bc].hpwl(cfg);
         for (const auto &bc : md.bounds_changed_nets_y)
             if (md.already_bounds_changed_x[bc] == MoveChangeData::NO_CHANGE)
-                md.wirelen_delta += md.new_net_bounds[bc].hpwl() - net_bounds[bc].hpwl();
+                md.wirelen_delta += md.new_net_bounds[bc].hpwl(cfg) - net_bounds[bc].hpwl(cfg);
 
         if (cfg.timing_driven) {
             for (const auto &tc : md.changed_arcs) {
@@ -1140,6 +1150,8 @@ Placer1Cfg::Placer1Cfg(Context *ctx)
     timingFanoutThresh = std::numeric_limits<int>::max();
     timing_driven = ctx->setting<bool>("timing_driven");
     slack_redist_iter = ctx->setting<int>("slack_redist_iter");
+    hpwl_scale_x = 1;
+    hpwl_scale_y = 1;
 }
 
 bool placer1(Context *ctx, Placer1Cfg cfg)
