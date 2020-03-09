@@ -533,13 +533,13 @@ def update_chain(cell, root):
         if child.type == root.type:
             chain_size[root.name] += 1
         if child.constr_x != UNCONSTR:
-            cell_locs[child.name].x = min(max_x, base.x + child.constr_x)
+            cell_locs[child.name].x = max(0, min(max_x, base.x + child.constr_x))
         else:
-            cell_locs[child.name].x = base.x; # better handling of UNCONSTR?
+            cell_locs[child.name].x = base.x # better handling of UNCONSTR?
         if child.constr_y != UNCONSTR:
-            cell_locs[child.name].y = min(max_y, base.y + child.constr_y)
+            cell_locs[child.name].y = max(0, min(max_y, base.y + child.constr_y))
         else:
-            cell_locs[child.name].y = base.y; # better handling of UNCONSTR?
+            cell_locs[child.name].y = base.y # better handling of UNCONSTR?
         chain_root[child.name] = root
         if len(child.constr_children) > 0:
             update_chain(child, root)
