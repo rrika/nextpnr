@@ -69,6 +69,10 @@ cfg.timingWeight = 10
 cfg.timing_driven = False
 cfg.solverTolerance = 1e-5
 cfg.placeAllAtOnce = False
+cfg.hpwl_scale_x = 1
+cfg.hpwl_scale_y = 1
+cfg.spread_scale_x = 1
+cfg.spread_scale_y = 1
 cfg.cellGroups = []
 
 availableBels = {}
@@ -559,9 +563,11 @@ def build_equations(es, axis, iter=-1):
     if axis == "x":
         cell_pos  = lambda cell: cell_locs[cell.name].x
         legal_pos = lambda cell: cell_locs[cell.name].legal_x
+        hwpl_scale = cfg.hpwl_scale_x
     else:
         cell_pos  = lambda cell: cell_locs[cell.name].y
         legal_pos = lambda cell: cell_locs[cell.name].legal_y
+        hwpl_scale = cfg.hpwl_scale_y
 
     es.reset()
 
@@ -612,7 +618,7 @@ def build_equations(es, axis, iter=-1):
                     continue
 
                 o_pos = cell_pos(other.cell)
-                weight = 1.0 / (len(ni.users) * max(1, abs(o_pos - this_pos)))
+                weight = 1.0 / (len(ni.users) * max(1, hwpl_scale * abs(o_pos - this_pos)))
 
                 if user_idx != -1 and ni.name in net_crit:
                     nc = net_crit[ni.name]
@@ -633,7 +639,7 @@ def build_equations(es, axis, iter=-1):
             l_pos = legal_pos(solve_cell)
             c_pos = cell_pos(solve_cell)
 
-            weight = alpha * iter / max(1, abs(l_pos - c_pos))
+            weight = alpha * iter / max(1, hwpl_scale * abs(l_pos - c_pos))
             # Add an arc from legalised to current position
             es.add_coeff(row, row, weight)
             es.add_rhs(row, weight * l_pos)
@@ -680,7 +686,7 @@ def total_hpwl():
             xmax = max(xmax, usrloc.x)
             ymin = min(ymin, usrloc.y)
             ymax = max(ymax, usrloc.y)
-        hpwl += (xmax - xmin) + (ymax - ymin)
+        hpwl += cfg.hpwl_scale_x * (xmax - xmin) + cfg.hpwl_scale_y * (ymax - ymin)
     return hpwl
 
 # Strict placement legalisation, performed after the initial HeAP spreading
@@ -1259,29 +1265,31 @@ class CutSpreader:
             reg = self.regions[rid]
             while reg.overused(beta):
                 changed = False
-                if reg.x0 > 0:
-                    self.grow_region(reg, reg.x0 - 1, reg.y0, reg.x1, reg.y1)
-                    changed = True
-                    if not reg.overused(beta):
-                        break
+                for _ in range(self.p.cfg.spread_scale_x):
+                    if reg.x0 > 0:
+                        self.grow_region(reg, reg.x0 - 1, reg.y0, reg.x1, reg.y1)
+                        changed = True
+                        if not reg.overused(beta):
+                            break
 
-                if reg.x1 < self.p.max_x:
-                    self.grow_region(reg, reg.x0, reg.y0, reg.x1 + 1, reg.y1)
-                    changed = True
-                    if not reg.overused(beta):
-                        break
+                    if reg.x1 < self.p.max_x:
+                        self.grow_region(reg, reg.x0, reg.y0, reg.x1 + 1, reg.y1)
+                        changed = True
+                        if not reg.overused(beta):
+                            break
 
-                if reg.y0 > 0:
-                    self.grow_region(reg, reg.x0, reg.y0 - 1, reg.x1, reg.y1)
-                    changed = True
-                    if not reg.overused(beta):
-                        break
+                for _ in range(self.p.cfg.spread_scale_y):
+                    if reg.y0 > 0:
+                        self.grow_region(reg, reg.x0, reg.y0 - 1, reg.x1, reg.y1)
+                        changed = True
+                        if not reg.overused(beta):
+                            break
 
-                if reg.y1 < self.p.max_y:
-                    self.grow_region(reg, reg.x0, reg.y0, reg.x1, reg.y1 + 1)
-                    changed = True
-                    if not reg.overused(beta):
-                        break
+                    if reg.y1 < self.p.max_y:
+                        self.grow_region(reg, reg.x0, reg.y0, reg.x1, reg.y1 + 1)
+                        changed = True
+                        if not reg.overused(beta):
+                            break
 
                 if not changed:
                     for bt in self.beltype:
