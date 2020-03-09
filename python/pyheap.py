@@ -40,11 +40,15 @@ class ChainExtent(DummyWithSlots):
 class SpreaderRegion(DummyWithSlots):
     __slots__ = ("id", "x0", "y0", "x1", "y1", "cells", "bels")
     def overused(self):
-        if self.bels < 4:
-            return self.cells > self.bels
-        else:
-            beta = 0.9
-            return self.cells > beta * self.bels
+        beta = 0.9
+        for cells, bels in zip(self.cells, self.bels):
+            if bels < 4:
+                if cells > bels:
+                    return True
+            else:
+                if cells > beta * bels:
+                    return True
+        return False
 
 class HeAPPlacer:
     def __getattr__(self, name):
@@ -64,6 +68,8 @@ cfg.criticalityExponent = 2
 cfg.timingWeight = 10
 cfg.timing_driven = False
 cfg.solverTolerance = 1e-5
+cfg.placeAllAtOnce = False
+cfg.cellGroups = []
 
 availableBels = {}
 net_crit = {}
@@ -201,6 +207,12 @@ def place():
             heap_runs = []
             break
 
+    if cfg.placeAllAtOnce:
+        # Never want to deal with LUTs, FFs, MUXFxs seperately,
+        # for now disable all single-cell-type runs and only have heteregenous
+        # runs
+        heap_runs = []
+
     heap_runs.append(all_celltypes)
 
     # The main HeAP placer loop
@@ -230,8 +242,12 @@ def place():
             solved_hpwl = total_hpwl()
 
             update_all_chains()
+            for group in cfg.cellGroups:
+                CutSpreader(HeAPPlacer(), group).run()
+
             for ty in sorted(run):
-                CutSpreader(HeAPPlacer(), ty).run()
+                if all(ty not in group for group in cfg.cellGroups):
+                    CutSpreader(HeAPPlacer(), {ty}).run()
 
             update_all_chains()
             spread_hpwl = total_hpwl()
@@ -509,7 +525,9 @@ def update_chain(cell, root):
                 0, 0, 0, 0, 0, 0, False, False
             )
 
-        chain_size[root.name] += 1
+        # FIXME: Improve handling of heterogeneous chains
+        if child.type == root.type:
+            chain_size[root.name] += 1
         if child.constr_x != UNCONSTR:
             cell_locs[child.name].x = min(max_x, base.x + child.constr_x)
         else:
@@ -961,16 +979,20 @@ def limit_to_reg_y(reg, val):
     return max(min(val, limit_high), limit_low)
 
 class CutSpreader:
-    def __init__(self, p, ty):
-        type_idx, _ = bel_types[ty]
+    def __init__(self, p, tys):
         # Context *ctx
         self.p = p                  # HeAPPlacer *p
-        self.beltype = ty           # IdString self.beltype
-        self.occupancy = []         # std::vector<std::vector<int>> occupancy
+        self.beltype = tys          # std::unordered_set<IdString> beltype
+        self.occupancy = []         # std::vector<std::vector<std::vector<int>>> occupancy
         self.groups = []            # std::vector<std::vector<int>> groups
         self.chaines = []           # std::vector<std::vector<ChainExtent>> chaines
         self.cell_extents = {}      # map<IdString, ChainExtent> cell_extents
-        self.fb = fast_bels[type_idx] # std::vector<std::vector<std::vector<BelId>>> &fb
+
+        tys = list(sorted(tys))
+        self.type_index = {ty: i for i, ty in enumerate(tys)}
+            # std::unordered_map<IdString, int> type_index
+        self.fb = [fast_bels[bel_types[ty][0]] for ty in tys]
+            # std::vector<std::vector<std::vector<std::vector<BelId>>> *> fb
 
         self.regions = []           # std::vector<SpreaderRegion> regions
         self.merged_regions = set() # std::unordered_set<int> merged_regions
@@ -1002,8 +1024,9 @@ class CutSpreader:
             if r.id in self.merged_regions:
                 continue
 
-            # log_info("%s (%d, %d) |_> (%d, %d) %d/%d\n", self.beltype, r.x0, r.y0, r.x1, r.y1, r.cells,
-            #          r.bels)
+            # for t in sorted(self.beltype):
+            #     log_info("%s (%d, %d) |_> (%d, %d) %d/%d\n", t, r.x0, r.y0, r.x1, r.y1,
+            #              r.cells[self.type_index[t]], r.bels[self.type_index[t]])
 
             workqueue.append((r.id, False))
             # cut_region(r, false)
@@ -1011,7 +1034,7 @@ class CutSpreader:
         while workqueue:
             rid, axis = workqueue.pop(0)
             r = self.regions[rid]
-            if r.cells == 0:
+            if all(c == 0 for c in r.cells):
                 continue
 
             res = self.cut_region(r, axis)
@@ -1046,55 +1069,59 @@ class CutSpreader:
         endt = time.time_ns()
         self.p.cl_time += duration(endt-startt)
 
-    def occ_at(self, x, y):
-        return self.occupancy[x][y]
+    def occ_at(self, x, y, ty):
+        return self.occupancy[x][y][ty]
 
-    def bels_at(self, x, y):
-        if x >= len(self.fb): return 0
-        if y >= len(self.fb[x]): return 0
-        return len(self.fb[x][y])
+    def bels_at(self, x, y, ty):
+        if x >= len(self.fb[ty]): return 0
+        if y >= len(self.fb[ty][x]): return 0
+        return len(self.fb[ty][x][y])
 
     def init(self):
-        self.occupancy         = [[0]*(self.p.max_y+1) for _ in range(self.p.max_x + 1)]
+        nbeltypes = len(self.beltype)
+        self.occupancy         = [[[0]*nbeltypes for _ in range(self.p.max_y+1)] for _ in range(self.p.max_x + 1)]
         self.groups            = [[-1]*(self.p.max_y+1) for _ in range(self.p.max_x + 1)]
         self.chaines           = [[None]*(self.p.max_y+1) for _ in range(self.p.max_x + 1)]
         self.cells_at_location = [[[] for _ in range(self.p.max_y+1)] for _ in range(self.p.max_x + 1)]
         for x in range(self.p.max_x+1):
             for y in range(self.p.max_y+1):
-                self.occupancy[x][y] = 0
+                self.occupancy[x][y] = [0]*nbeltypes
                 self.groups[x][y] = -1
                 self.chaines[x][y] = ChainExtent(x, y, x, y)
 
         def set_chain_ext(cell, x, y):
+            ckey = cell.name
             if cell not in self.cell_extents:
-                self.cell_extents[cell] = ChainExtent(x, y, x, y)
+                self.cell_extents[ckey] = ChainExtent(x, y, x, y)
             else:
-                self.cell_extents[cell].x0 = min(self.cell_extents[cell].x0, x)
-                self.cell_extents[cell].y0 = min(self.cell_extents[cell].y0, y)
-                self.cell_extents[cell].x1 = max(self.cell_extents[cell].x1, x)
-                self.cell_extents[cell].y1 = max(self.cell_extents[cell].y1, y)
+                self.cell_extents[ckey].x0 = min(self.cell_extents[ckey].x0, x)
+                self.cell_extents[ckey].y0 = min(self.cell_extents[ckey].y0, y)
+                self.cell_extents[ckey].x1 = max(self.cell_extents[ckey].x1, x)
+                self.cell_extents[ckey].y1 = max(self.cell_extents[ckey].y1, y)
 
-        for cell, cell_loc in self.p.cell_locs.items():
-            if ctx.cells[cell].type != self.beltype:
+        for cname, cell_loc in self.p.cell_locs.items():
+            cell = ctx.cells[cname]
+            if cell.type not in self.beltype:
                 continue
-            if ctx.cells[cell].belStrength > STRENGTH_STRONG:
+            if cell.belStrength > STRENGTH_STRONG:
                 continue
-            self.occupancy[cell_loc.x][cell_loc.y] += 1
+            self.occupancy[cell_loc.x][cell_loc.y][self.type_index[cell.type]] += 1
             # Compute ultimate extent of each chain root
             if cell in self.p.chain_root:
-                set_chain_ext(self.p.chain_root[cell].name, cell_loc.x, cell_loc.y)
-            elif ctx.cells[cell].constr_children:
+                set_chain_ext(self.p.chain_root[cell], cell_loc.x, cell_loc.y)
+            elif cell.constr_children:
                 set_chain_ext(cell, cell_loc.x, cell_loc.y)
 
-        for cell, cell_loc in self.p.cell_locs.items():
-            if ctx.cells[cell].type != self.beltype:
+        for cname, cell_loc in self.p.cell_locs.items():
+            cell = ctx.cells[cname]
+            if cell.type not in self.beltype:
                 continue
             # Transfer chain extents to the actual chaines structure
             ce = None
             if cell in self.p.chain_root:
                 ce = self.cell_extents[self.p.chain_root[cell].name] # ref
-            elif ctx.cells[cell].constr_children:
-                ce = self.cell_extents[cell] # ref
+            elif cell.constr_children:
+                ce = self.cell_extents[cell.name] # ref
             if ce:
                 lce = self.chaines[cell_loc.x][cell_loc.y]
                 lce.x0 = min(lce.x0, ce.x0)
@@ -1103,7 +1130,7 @@ class CutSpreader:
                 lce.y1 = max(lce.y1, ce.y1)
 
         for cell in self.p.solve_cells:
-            if cell.type != self.beltype:
+            if cell.type not in self.beltype:
                 continue
             self.cells_at_location[self.p.cell_locs[cell.name].x][self.p.cell_locs[cell.name].y].append(cell)
 
@@ -1114,8 +1141,9 @@ class CutSpreader:
                 # log_info("%d %d\n", groups[x][y], mergee.id)
                 assert self.groups[x][y] == mergee.id
                 self.groups[x][y] = merged.id
-                merged.cells += self.occ_at(x, y)
-                merged.bels += self.bels_at(x, y)
+                for i in range(len(self.beltype)):
+                    merged.cells[i] += self.occ_at(x, y, i)
+                    merged.bels[i] += self.bels_at(x, y, i)
 
         self.merged_regions.add(mergee.id)
         self.grow_region(merged, mergee.x0, mergee.y0, mergee.x1, mergee.y1)
@@ -1136,8 +1164,9 @@ class CutSpreader:
             def process_location(x, y):
                 # Merge with any overlapping regions
                 if self.groups[x][y] == -1:
-                    r.bels += self.bels_at(x, y)
-                    r.cells += self.occ_at(x, y)
+                    for i in range(len(self.beltype)):
+                        r.bels[i] += self.bels_at(x, y, i)
+                        r.cells[i] += self.occ_at(x, y, i)
 
                 if self.groups[x][y] != -1 and self.groups[x][y] != r.id:
                     self.merge_regions(r, self.regions[self.groups[x][y]])
@@ -1163,7 +1192,14 @@ class CutSpreader:
         for x in range(0, self.p.max_x+1):
             for y in range(0, self.p.max_y+1):
                 # Either already in a group, or not overutilised. Ignore
-                if self.groups[x][y] != -1 or (self.occ_at(x, y) <= self.bels_at(x, y)):
+                if self.groups[x][y] != -1:
+                    continue
+                overutilised = False
+                for i in range(len(self.beltype)):
+                    if self.occ_at(x, y, i) > self.bels_at(x, y, i):
+                        overutilised = True
+                        break
+                if not overutilised:
                     continue
                 # log_info("%d %d %d\n", x, y, occ_at(x, y))
                 id_ = len(self.regions)
@@ -1172,8 +1208,8 @@ class CutSpreader:
                 reg.id = id_
                 reg.x0 = reg.x1 = x
                 reg.y0 = reg.y1 = y
-                reg.bels = self.bels_at(x, y)
-                reg.cells = self.occ_at(x, y)
+                reg.bels = [self.bels_at(x, y, t) for t in range(len(self.beltype))]
+                reg.cells = [self.occ_at(x, y, t) for t in range(len(self.beltype))]
                 # Make sure we cover carries, etc
                 self.grow_region(reg, reg.x0, reg.y0, reg.x1, reg.y1, True)
 
@@ -1186,12 +1222,13 @@ class CutSpreader:
                     # First try expanding in x
                     if reg.x1 < self.p.max_x:
                         over_occ_x = False
-                        for y1 in range(reg.y0, reg.y1+1):
-                            if self.occ_at(reg.x1 + 1, y1) > self.bels_at(reg.x1 + 1, y1):
-                                # log_info("(%d, %d) occ %d bels %d\n", reg.x1+ 1, y1, occ_at(reg.x1 + 1, y1),
-                                # bels_at(reg.x1 + 1, y1))
-                                over_occ_x = True
-                                break
+                        for t in range(len(self.beltype)):
+                            for y1 in range(reg.y0, reg.y1+1):
+                                if self.occ_at(reg.x1 + 1, y1, t) > self.bels_at(reg.x1 + 1, y1, t):
+                                    # log_info("(%d, %d) occ %d bels %d\n", reg.x1+ 1, y1, occ_at(reg.x1 + 1, y1),
+                                    # bels_at(reg.x1 + 1, y1))
+                                    over_occ_x = True
+                                    break
 
                         if over_occ_x:
                             expanded = True
@@ -1199,12 +1236,13 @@ class CutSpreader:
 
                     if reg.y1 < self.p.max_y:
                         over_occ_y = False
-                        for x1 in range(reg.x0, reg.x1+1):
-                            if self.occ_at(x1, reg.y1 + 1) > self.bels_at(x1, reg.y1 + 1):
-                                # log_info("(%d, %d) occ %d bels %d\n", x1, reg.y1 + 1, occ_at(x1, reg.y1 + 1),
-                                # bels_at(x1, reg.y1 + 1))
-                                over_occ_y = True
-                                break
+                        for t in range(len(self.beltype)):
+                            for x1 in range(reg.x0, reg.x1+1):
+                                if self.occ_at(x1, reg.y1 + 1, t) > self.bels_at(x1, reg.y1 + 1, t):
+                                    # log_info("(%d, %d) occ %d bels %d\n", x1, reg.y1 + 1, occ_at(x1, reg.y1 + 1),
+                                    # bels_at(x1, reg.y1 + 1))
+                                    over_occ_y = True
+                                    break
                         if over_occ_y:
                             expanded = True
                             self.grow_region(reg, reg.x0, reg.y0, reg.x1, reg.y1 + 1)
@@ -1245,11 +1283,13 @@ class CutSpreader:
                         break
 
                 if not changed:
-                    if reg.cells > reg.bels:
-                        log_error("Failed to expand region (%d, %d) |_> (%d, %d) of %d %ss" %
-                            (reg.x0, reg.y0, reg.x1, reg.y1, reg.cells, self.beltype))
-                    else:
-                        break
+                    for bt in self.beltype:
+                        # how does this even work in the C++ version??
+                        # reg.cells needs an index
+                        if reg.cells > reg.bels:
+                            log_error("Failed to expand region (%d, %d) |_> (%d, %d) of %d %ss" %
+                                (reg.x0, reg.y0, reg.x1, reg.y1, reg.cells[self.type_index[bt]], bt))
+                    break
 
     def cut_region(self, r, dir):
         p = self.p
@@ -1260,7 +1300,8 @@ class CutSpreader:
         for x in range(r.x0, r.x1+1):
             for y in range(r.y0, r.y1+1):
                 cut_cells.extend(cal[x][y])
-                total_bels += self.bels_at(x, y)
+                for t in range(len(self.beltype)):
+                    total_bels += self.bels_at(x, y, t)
 
         for cell in cut_cells:
             total_cells += self.p.chain_size.get(cell.name, 1)
@@ -1271,7 +1312,7 @@ class CutSpreader:
             cut_cells.sort(key=lambda cinfo: self.p.cell_locs[cinfo.name].rawx)
 
         if len(cut_cells) < 2:
-            return {}
+            return None
         # Find the cells midpoint, counting chains in terms of their total size - making the initial source cut
         pivot_cells = 0
         pivot = 0
@@ -1281,9 +1322,9 @@ class CutSpreader:
                 break
             pivot+=1
 
-        if (pivot == len(cut_cells)):
+        if (pivot >= len(cut_cells)):
             pivot = len(cut_cells) - 1
-        # log_info("orig pivot %d lc %d rc %d\n", pivot, pivot_cells, r.cells - pivot_cells)
+        # log_info("orig pivot %d/%d lc %d rc %d\n", pivot, len(cut_cells), pivot_cells, r.cells - pivot_cells)
 
         # Find the clearance required either side of the pivot
         clearance_l = 0
@@ -1310,9 +1351,10 @@ class CutSpreader:
         while (trimmed_l < (r.y1 if dir else r.x1)):
             have_bels = False
             for i in range(r.x0 if dir else r.y0, (r.x1 if dir else r.y1)+1):
-                if self.bels_at(i if dir else trimmed_l, trimmed_l if dir else i) > 0:
-                    have_bels = True
-                    break
+                for t in range(len(self.beltype)):
+                    if self.bels_at(i if dir else trimmed_l, trimmed_l if dir else i, t) > 0:
+                        have_bels = True
+                        break
 
             if have_bels:
                 break
@@ -1321,9 +1363,10 @@ class CutSpreader:
         while (trimmed_r > (r.y0 if dir else r.x0)):
             have_bels = False
             for i in range(r.x0 if dir else r.y0, (r.x1 if dir else r.y1)+1):
-                if self.bels_at(i if dir else trimmed_r, trimmed_r if dir else i) > 0:
-                    have_bels = True
-                    break
+                for t in range(len(self.beltype)):
+                    if self.bels_at(i if dir else trimmed_r, trimmed_r if dir else i, t) > 0:
+                        have_bels = True
+                        break
 
             if have_bels:
                 break
@@ -1331,52 +1374,85 @@ class CutSpreader:
 
         # log_info("tl %d tr %d cl %d cr %d\n", trimmed_l, trimmed_r, clearance_l, clearance_r)
         if ((trimmed_r - trimmed_l + 1) <= max(clearance_l, clearance_r)):
-            return {}
+            return None
         # Now find the initial target cut that minimises utilisation imbalance, whilst
         # meeting the clearance requirements for any large macros
-        left_cells = pivot_cells
-        right_cells = total_cells - pivot_cells
-        left_bels = 0
-        right_bels = total_bels
+        left_cells_v  = [0] * len(self.beltype)
+        right_cells_v = [0] * len(self.beltype)
+        left_bels_v   = [0] * len(self.beltype)
+        right_bels_v  = r.bels[:]
+
+        for cut_cell in cut_cells[:pivot+1]:
+            left_cells_v[self.type_index[cut_cell.type]] += p.chain_size.get(cut_cell.name, 1)
+        for cut_cell in cut_cells[pivot+1:]:
+            right_cells_v[self.type_index[cut_cell.type]] += p.chain_size.get(cut_cell.name, 1)
+
         best_tgt_cut = -1
         best_deltaU = max_double
-        target_cut_bels = (None, None)
         for i in range(trimmed_l, trimmed_r+1):
-            slither_bels = 0
-            for j in range(r.x0 if dir else r.y0, (r.x1 if dir else r.y1)+1):
-                slither_bels += self.bels_at(j, i) if dir else self.bels_at(i, j)
+            slither_bels = [0] * len(self.beltype)
+            for t in range(len(self.beltype)):
+                for j in range(r.x0 if dir else r.y0, (r.x1 if dir else r.y1)+1):
+                    slither_bels[t] += self.bels_at(j, i, t) if dir else self.bels_at(i, j, t)
 
-            left_bels += slither_bels
-            right_bels -= slither_bels
+            for t in range(len(self.beltype)):
+                left_bels_v[t] += slither_bels[t]
+                right_bels_v[t] -= slither_bels[t]
+
             if (((i - trimmed_l) + 1) >= clearance_l and ((trimmed_r - i) + 1) >= clearance_r):
                 # Solution is potentially valid
-                if left_bels == 0 or right_bels == 0: continue  # not in original code
-                aU = abs(float(left_cells) / float(left_bels) - float(right_cells) / float(right_bels))
-                if aU < best_deltaU:
-                    best_deltaU = aU
-                    best_tgt_cut = i
-                    target_cut_bels = (left_bels, right_bels)
+                aU = 0
+                for lc, lb, rc, rb in zip(left_cells_v, left_bels_v, right_cells_v, right_bels_v):
+                    if (lb == 0) != (rb == 0): # not in original code
+                        break
+                    aU += (lc+rc) * abs(lc/max(lb, 1) - rc/max(rb, 1))
+                else:
+                    if aU < best_deltaU:
+                        best_deltaU = aU
+                        best_tgt_cut = i
 
         if best_tgt_cut == -1:
-            return {}
-        left_bels, right_bels = target_cut_bels
-        # log_info("pivot %d target cut %d lc %d lb %d rc %d rb %d\n", pivot, best_tgt_cut, left_cells, left_bels,
-        # right_cells, right_bels)
+            return None
+
+        # left_bels, right_bels = target_cut_bels
+        left_bels_v   = [0] * len(self.beltype)
+        right_bels_v  = [0] * len(self.beltype)
+        for x in range(r.x0, (r.x1 if dir else best_tgt_cut)+1):
+            for y in range(r.y0, (best_tgt_cut if dir else r.y1)+1):
+                for t in range(len(self.beltype)):
+                    left_bels_v[t] += self.bels_at(x, y, t)
+        for x in range(r.x0 if dir else (best_tgt_cut+1), r.x1+1):
+            for y in range((best_tgt_cut+1) if dir else r.y0, r.y1+1):
+                for t in range(len(self.beltype)):
+                    right_bels_v[t] += self.bels_at(x, y, t)
+
+        # log_info("pivot %d target cut %d lc %d lb %d rc %d rb %d\n", pivot, best_tgt_cut,
+        #   sum(left_cells_v), sum(left_bels_v), sum(right_cells_v), sum(right_bels_v))
 
         # Peturb the source cut to eliminate overutilisation
-        while (pivot > 0 and (float(left_cells) / float(left_bels) > float(right_cells) / float(right_bels))):
+        def is_part_overutil(r):
+            delta = 0
+            for lc, lb, rc, rb in zip(left_cells_v, left_bels_v, right_cells_v, right_bels_v):
+                delta += lc/max(lb, 1) - rc/max(rb, 1)
+            if r:
+                return delta < 0
+            else:
+                return delta > 0
+
+        while pivot > 0 and is_part_overutil(False):
             move_cell = cut_cells[pivot]
             size = p.chain_size.get(move_cell.name, 1)
-            left_cells -= size
-            right_cells += size
+            for t in range(len(self.beltype)):
+                left_cells_v[t] -= size
+                right_cells_v[t] += size
             pivot -= 1
 
-        while (pivot < len(cut_cells) - 1 and
-               (float(left_cells) / float(left_bels) < float(right_cells) / float(right_bels))):
+        while pivot < len(cut_cells) - 1 and is_part_overutil(True):
             move_cell = cut_cells[pivot + 1]
             size = p.chain_size.get(move_cell.name, 1)
-            left_cells += size
-            right_cells -= size
+            for t in range(len(self.beltype)):
+                left_cells_v[t] += size
+                right_cells_v[t] -= size
             pivot += 1
 
         # log_info("peturbed pivot %d lc %d lb %d rc %d rb %d\n", pivot, left_cells, left_bels, right_cells,
@@ -1469,15 +1545,15 @@ class CutSpreader:
         rl.y0 = r.y0
         rl.x1 = r.x1 if dir else best_tgt_cut
         rl.y1 = best_tgt_cut if dir else r.y1
-        rl.cells = left_cells
-        rl.bels = left_bels
+        rl.cells = left_cells_v
+        rl.bels = left_bels_v
         rr.id = len(self.regions) + 1
         rr.x0 = r.x0 if dir else (best_tgt_cut + 1)
         rr.y0 = (best_tgt_cut + 1) if dir else r.y0
         rr.x1 = r.x1
         rr.y1 = r.y1
-        rr.cells = right_cells
-        rr.bels = right_bels
+        rr.cells = right_cells_v
+        rr.bels = right_bels_v
         self.regions.append(rl)
         self.regions.append(rr)
         for x in range(rl.x0, rl.x1+1):
