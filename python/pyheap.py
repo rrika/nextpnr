@@ -39,8 +39,7 @@ class ChainExtent(DummyWithSlots):
 
 class SpreaderRegion(DummyWithSlots):
     __slots__ = ("id", "x0", "y0", "x1", "y1", "cells", "bels")
-    def overused(self):
-        beta = 0.9
+    def overused(self, beta):
         for cells, bels in zip(self.cells, self.bels):
             if bels < 4:
                 if cells > bels:
@@ -64,6 +63,7 @@ cfg = Dummy()
 #cfg.timingWeight = ctx.setting<int>("placerHeap/timingWeight", 10)
 #cfg.timing_driven = ctx.setting<bool>("timing_driven")
 cfg.alpha = 0.1
+cfg.beta = 0.9
 cfg.criticalityExponent = 2
 cfg.timingWeight = 10
 cfg.timing_driven = False
@@ -1249,37 +1249,38 @@ class CutSpreader:
                 self.regions.append(reg)
 
     def expand_regions(self):
-        overu_regions = [r.id for r in self.regions if r.overused()]
+        beta = self.p.cfg.beta
+        overu_regions = [r.id for r in self.regions if r.overused(beta)]
 
         while overu_regions:
             rid = overu_regions.pop(0)
             if rid in self.merged_regions:
                 continue
             reg = self.regions[rid]
-            while reg.overused():
+            while reg.overused(beta):
                 changed = False
                 if reg.x0 > 0:
                     self.grow_region(reg, reg.x0 - 1, reg.y0, reg.x1, reg.y1)
                     changed = True
-                    if not reg.overused():
+                    if not reg.overused(beta):
                         break
 
                 if reg.x1 < self.p.max_x:
                     self.grow_region(reg, reg.x0, reg.y0, reg.x1 + 1, reg.y1)
                     changed = True
-                    if not reg.overused():
+                    if not reg.overused(beta):
                         break
 
                 if reg.y0 > 0:
                     self.grow_region(reg, reg.x0, reg.y0 - 1, reg.x1, reg.y1)
                     changed = True
-                    if not reg.overused():
+                    if not reg.overused(beta):
                         break
 
                 if reg.y1 < self.p.max_y:
                     self.grow_region(reg, reg.x0, reg.y0, reg.x1, reg.y1 + 1)
                     changed = True
-                    if not reg.overused():
+                    if not reg.overused(beta):
                         break
 
                 if not changed:
