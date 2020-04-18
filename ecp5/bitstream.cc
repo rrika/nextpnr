@@ -18,6 +18,7 @@
  */
 
 #include "bitstream.h"
+#include "../common/design_utils.h"
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <fstream>
@@ -70,7 +71,7 @@ static std::string get_trellis_wirename(Context *ctx, Location loc, WireId wire)
     return rel_prefix + "_" + basename;
 }
 
-static std::pair<Location, int32_t> parse_trellis_wirename(
+static std::pair<Location, IdString> parse_trellis_wirename(
     Context *ctx,
     const LocationTypePOD *locType,
     std::string& relname)
@@ -79,14 +80,14 @@ static std::pair<Location, int32_t> parse_trellis_wirename(
         return {};
 
     char direction = relname[0];
+    std::string basename;
     char *p_end = const_cast<char*>(relname.c_str()+1);
     int distance = std::strtol(relname.c_str()+1, &p_end, 10);
-    std::string basename;
-    if (*p_end == '_')
+    if (*p_end == '_' && (direction == 'N' || direction == 'E' || direction == 'S' || direction == 'W'))
         basename = std::string(p_end+1, &*relname.end());
     else {
         basename = relname;
-        direction = '\0';
+        direction = 'X';
         distance = 0;
     }
 
@@ -108,15 +109,7 @@ static std::pair<Location, int32_t> parse_trellis_wirename(
         distance,
         basename.c_str());
 
-    auto num_wires = locType->num_wires;
-    auto *wire_data = &*locType->wire_data;
-    int32_t wireIndex;
-    for (wireIndex=0; wireIndex < num_wires; wireIndex++)
-    {
-        if (basename == std::string(wire_data[wireIndex].name.get()))
-            return {loc, wireIndex};
-    }
-    return {loc, -1};
+    return {loc, ctx->id(basename)};
 }
 
 static std::vector<bool> int_to_bitvector(int val, int size)
@@ -680,26 +673,27 @@ void read_bitstream(Context *ctx, std::string text_config_file)
 
     std::map<
         std::pair<const LocationTypePOD*, std::string>,
-        std::pair<Location, int32_t>
+        std::pair<Location, IdString>
     > wireCache;
 
-    auto wireid_from_trellis_wirename = [&](
+    auto almost_wireid_from_trellis_wirename = [&](
         const LocationTypePOD* locType,
         std::string name)
-        -> std::pair<Location, int32_t>
+        -> std::pair</*relative*/Location, IdString>
     {
         auto key = std::make_pair(locType, name);
-        auto insertResult = wireCache.insert({key, {}});
+        auto dummyValue = std::make_pair(Location(), IdString());
+        auto insertResult = wireCache.insert(std::make_pair(key, dummyValue));
         if (insertResult.second)
             return insertResult.first->second = parse_trellis_wirename(
                 ctx, locType, name);
         else {
             auto loc_index = insertResult.first->second;
-            printf("recalling %s to be %d %d %d\n",
+            printf("recalling %s to be %d %d %s\n",
                 name.c_str(),
                 loc_index.first.x,
                 loc_index.first.y,
-                loc_index.second);
+                loc_index.second.c_str(ctx));
             return loc_index;
         }
     };
@@ -712,6 +706,30 @@ void read_bitstream(Context *ctx, std::string text_config_file)
         int32_t
     >, int32_t> pipCache;
 
+    auto wireid_from_location_and_name = [&](
+        Location loc,
+        IdString port_name
+    ) -> std::pair<Location, int32_t> {
+        const LocationTypePOD* locType;
+        {
+            PipId pip; // dummy object for passing to locInfo
+            pip.location = loc;
+            pip.index = -1;
+            locType = ctx->locInfo(pip);
+        }
+        auto num_wires = locType->num_wires;
+        auto *wire_data = &*locType->wire_data;
+        int32_t wire_index;
+        for (wire_index=0; wire_index < num_wires; wire_index++)
+        {
+            //printf(" %s ==? %s\n", port_name.c_str(ctx), wire_data[wire_index].name.get());
+            if (port_name == ctx->id(wire_data[wire_index].name.get()))
+                return {loc, wire_index};
+        }
+
+        return {loc, -1};
+    };
+
     auto pipid_from_trellis_wirenames = [&](
         Location loc,
         std::string source,
@@ -722,8 +740,30 @@ void read_bitstream(Context *ctx, std::string text_config_file)
         pip.index = -1;
         const LocationTypePOD* locType = ctx->locInfo(pip);
 
-        auto relSourceWire = wireid_from_trellis_wirename(locType, source);
-        auto relSinkWire = wireid_from_trellis_wirename(locType, sink);
+        Location globalLoc;
+        globalLoc.x = 0;
+        globalLoc.y = 0;
+
+        std::string sourcePrefix2 = source.substr(0, 2);
+        std::string sinkPrefix2 = sink.substr(0, 2);
+        // bool isSourceGlobal = (sourcePrefix2 == "G_" || sourcePrefix2 == "L_" || sourcePrefix2 == "R_");
+        // bool isSinkGlobal = (sinkPrefix2 == "G_" || sinkPrefix2 == "L_" || sinkPrefix2 == "R_");
+        bool isSourceGlobal = false;
+        bool isSinkGlobal = false;
+
+        // clean this up at some point
+        auto almostRelSourceWire = almost_wireid_from_trellis_wirename(locType, source);
+        auto almostRelSinkWire = almost_wireid_from_trellis_wirename(locType, sink);
+        auto sourceWire_ = wireid_from_location_and_name(
+            isSourceGlobal ? globalLoc :
+            loc + almostRelSourceWire.first,
+            almostRelSourceWire.second);
+        auto sinkWire_ = wireid_from_location_and_name(
+            isSinkGlobal ? globalLoc :
+            loc + almostRelSinkWire.first,
+            almostRelSinkWire.second);
+        auto relSourceWire = std::make_pair(almostRelSourceWire.first, sourceWire_.second);
+        auto relSinkWire = std::make_pair(almostRelSinkWire.first, sinkWire_.second);
 
         auto key = std::make_tuple(
             locType,
@@ -733,13 +773,15 @@ void read_bitstream(Context *ctx, std::string text_config_file)
             relSinkWire.second
         );
 
-        printf("look for pip (%d,%d,%d) -> (%d,%d,%d)\n",
+        printf("look for pip (%d,%d,%d:%s) -> (%d,%d,%d:%s)\n",
             relSourceWire.first.x,
             relSourceWire.first.y,
             relSourceWire.second,
+            almostRelSourceWire.second.c_str(ctx),
             relSinkWire.first.x,
             relSinkWire.first.y,
-            relSinkWire.second
+            relSinkWire.second,
+            almostRelSinkWire.second.c_str(ctx)
         );
         auto insertResult = pipCache.insert({key, -1});
         if (insertResult.second) {
@@ -776,10 +818,10 @@ void read_bitstream(Context *ctx, std::string text_config_file)
 
         WireId sourceWire;
         WireId sinkWire;
-        sourceWire.location = loc + relSourceWire.first;
-        sourceWire.index = relSourceWire.second;
-        sinkWire.location = loc + relSinkWire.first;
-        sinkWire.index = relSinkWire.second;
+        sourceWire.location = sourceWire_.first;
+        sourceWire.index    = sourceWire_.second;
+        sinkWire.location = sinkWire_.first;
+        sinkWire.index    = sinkWire_.second;
 
         return std::make_tuple(sourceWire, pip, sinkWire);
     };
@@ -812,6 +854,10 @@ void read_bitstream(Context *ctx, std::string text_config_file)
             );
             if (sourceWire.index != -1 && pipId.index != -1 && sinkWire.index != -1)
                 arcs.push_back(source_pip_sink);
+            else
+                printf(" ERROR ERROR ERROR\n");
+
+            printf("\n");
         }
     }
     
@@ -824,6 +870,9 @@ void read_bitstream(Context *ctx, std::string text_config_file)
     }
 
     std::map<WireId, NetInfo*> nets;
+    std::map<std::pair<BelId, IdString>, NetInfo*> belPinNets;
+    std::set<NetInfo*> unclaimedNets;
+
     std::function<NetInfo*(WireId)> netForWire = [&](WireId wireId) -> NetInfo* {
         {
             auto it = nets.find(wireId);
@@ -831,25 +880,100 @@ void read_bitstream(Context *ctx, std::string text_config_file)
                 return it->second;
         }
 
+        bool anyInOutBels = false;
+        bool anyOutBels = false;
+        int belPinCount = 0;
+
+        for (auto bp: ctx->getWireBelPins(wireId)) {
+            belPinCount++;
+            if (ctx->getBelPinType(bp.bel, bp.pin) == PORT_INOUT)
+                anyInOutBels = true;
+            if (ctx->getBelPinType(bp.bel, bp.pin) == PORT_OUT)
+                anyOutBels = true;
+        }
+
         NetInfo *net = nullptr;
         auto it = upstreamWire.find(wireId);
         if (it == upstreamWire.end()) {
+            // consider fixed pips
+            int uphillPips = 0;
+            int fixedUphillPips = 0;
+            for (auto pip: ctx->getPipsUphill(wireId)) {
+                uphillPips++;
+                // 0 = normal
+                // 1 = fixed
+                // 2 = fixed and  "PCS" in snk_name or "DCU" in snk_name or "DCU" in src_name
+                if (ctx->getPipClass(pip) != 0) {
+                    if (fixedUphillPips == 0) {
+                        auto upWireId = ctx->getPipSrcWire(pip);
+                        it = upstreamWire.insert({wireId, {upWireId, pip}}).first;
+                    }
+                    fixedUphillPips++;
+                }
+            }
+            // IdString fullname = ctx->getWireName(wireId); // X/Y/localname
+            // log_warning("wire %s has %d fixed of %d total pips\n",
+            //     fullname.c_str(ctx),
+            //     fixedUphillPips,
+            //     uphillPips);
+        }
+        if (it == upstreamWire.end()) {
+
+            IdString fullname = ctx->getWireName(wireId); // X/Y/localname
+
+            if (!anyOutBels && !anyInOutBels) {
+                log_warning("wire %s is driven neither by pip nor any of %d bels\n",
+                    fullname.c_str(ctx), belPinCount);
+            }
+
             net = ctx->createNet(
                 ctx->getWireName(wireId));
+            unclaimedNets.insert(net);
         } else {
             auto prevWire = it->second.first;
+            auto pip = it->second.second;
             net = netForWire(prevWire);
+
+            if (anyOutBels) {
+                IdString fullname = ctx->getWireName(wireId);
+                log_warning("wire %s of net %s driven through pip %s also "
+                    "has a connected bel or multiple with OUT direction\n",
+                    fullname.c_str(ctx),
+                    net->name.c_str(ctx),
+                    ctx->getPipName(pip).c_str(ctx)
+                );
+            }
         }
+
         auto pip = it->second.second;
-        if (ctx->checkPipAvail(pip))
+        if (ctx->checkPipAvail(pip)) // this shouldn't be necessary
             ctx->bindPip(pip, net, PlaceStrength::STRENGTH_WEAK);
+
+        //    ---wire--- >pip> ---wire--- >pip> ---wire---
+        //       |                |  |
+        // bel --´          bel --´  `-- bel
+        // driver           user         user
+
+        for (auto belPin: ctx->getWireBelPins(wireId)) {
+            auto direction = ctx->getBelPinType(belPin.bel, belPin.pin);
+            log_info("recording belPinNets[{%s, %s}] = %s (%s)\n",
+                ctx->getBelName(belPin.bel).c_str(ctx),
+                belPin.pin.c_str(ctx),
+                net->name.c_str(ctx),
+                direction == PORT_IN ? "in" :
+                direction == PORT_OUT ? "out" : "inout"
+            );
+            belPinNets[{belPin.bel, belPin.pin}] = net;
+        }
         nets[wireId] = net;
+
         return net;
     };
 
     for (auto source_pip_sink: arcs) {
         netForWire(std::get<2>(source_pip_sink));
     }
+
 
     for (auto &tnametile : cc.tiles) {
         ii++;
@@ -881,24 +1005,77 @@ void read_bitstream(Context *ctx, std::string text_config_file)
             bel.location = loc;
             bel.index = i;
 
-            IdString cellType = ctx->getBelType(bel);
+            IdString belType = ctx->getBelType(bel);
 
-            // log_info("    %d: %s\n", i, cellType.c_str(ctx));
+            // log_info("    %d: %s\n", i, belType.c_str(ctx));
 
 
-            if (cellType == id_TRELLIS_SLICE) {
+            if (belType == id_TRELLIS_SLICE) {
+
+                // IdString cellType = belType; // ???
 
                 std::string slice = belData[i].name.get();
 
-                std::unique_ptr<CellInfo> cell = create_ecp5_cell(ctx, id_TRELLIS_SLICE, "");
-                CellInfo *pCell = cell.get();
-                ctx->cells[cell->name] = std::move(cell);
+                int connectedPins = 0;
+                int unconnectedPins = 0;
+
+                for (auto port_name: ctx->getBelPins(bel)) {
+                    auto it = belPinNets.find({bel, port_name});
+                    if (it == belPinNets.end())
+                        unconnectedPins++;
+                    else
+                        connectedPins++;
+                }
+
+                log_info("for cell %s %d/%d ports are connected to a net\n",
+                    //cell->name.c_str(ctx),
+                    "<todo>",
+                    connectedPins,
+                    connectedPins + unconnectedPins
+                );
+
+                if (connectedPins == 0)
+                    continue;
+
+                CellInfo *cell;
+
+                {
+                    std::unique_ptr<CellInfo> ucell = create_ecp5_cell(ctx, id_TRELLIS_SLICE, "");
+                    cell = ucell.get();
+                    ctx->cells[cell->name] = std::move(ucell);
+                }
 
                 int idx = ctx->getBelFlatIndex(bel);
                 if (ctx->bel_to_cell.at(idx) == nullptr)
-                    ctx->bindBel(bel, pCell, STRENGTH_WEAK);
+                    ctx->bindBel(bel, cell, STRENGTH_WEAK);
                 else
                     log_warning("      already occupied\n");
+
+
+                for (auto port_name: ctx->getBelPins(bel)) {
+                    // no idea how CellInfo.pins gets initialized but considering the fallthrough is
+                    // cell port name = bel pin name, just use that
+
+                    auto it = belPinNets.find({bel, port_name});
+                    if (it == belPinNets.end()) {
+                        // log_info(" querying belPinNets[{%s, %s}] = <nothing>\n",
+                        //     ctx->getBelName(bel).c_str(ctx),
+                        //     port_name.c_str(ctx));
+                        continue;
+
+                    } else {
+                        // log_info(" querying belPinNets[{%s, %s}] = %s\n",
+                        //         ctx->getBelName(bel).c_str(ctx),
+                        //         port_name.c_str(ctx),
+                        //         it->second->name.c_str(ctx));
+                    }
+
+                    if (auto it2 = unclaimedNets.find(it->second); it2 != unclaimedNets.end())
+                        unclaimedNets.erase(it2);
+
+                    connect_port(ctx, it->second, cell, port_name);
+                }
+
 
                 /*
                 std::string tname = ctx->getTileByTypeAndLocation(bel.location.y, bel.location.x, "PLC2");
@@ -919,6 +1096,11 @@ void read_bitstream(Context *ctx, std::string text_config_file)
                 */
             }
         }
+    }
+
+    for (auto net : unclaimedNets) {
+        log_warning("no bel connected to net %s\n",
+            net->name.c_str(ctx));
     }
 }
 
