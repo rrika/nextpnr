@@ -71,6 +71,36 @@ static std::string get_trellis_wirename(Context *ctx, Location loc, WireId wire)
     return rel_prefix + "_" + basename;
 }
 
+static std::pair<size_t, Location> parse_direction(const char *x) {
+    Location zero(0, 0);
+    Location loc = zero;
+    const char *start = x;
+    while (true) {
+        char direction = *x++;
+        if (direction == '_')
+            return {x-start, loc};
+        else if (direction == '\0')
+            return {0, zero};
+
+        const char *end = x;
+        int distance = std::strtol(const_cast<char*>(x), const_cast<char**>(&end), 10);
+        if (x == end)
+            return {0, zero};
+        x = end;
+
+        if (direction == 'N')
+            loc.y = -distance;
+        else if (direction == 'E')
+            loc.x = distance;
+        else if (direction == 'S')
+            loc.y = distance;
+        else if (direction == 'W')
+            loc.x = -distance;
+        else
+            return {0, zero};
+    }
+}
+
 static std::pair<Location, IdString> parse_trellis_wirename(
     Context *ctx,
     const LocationTypePOD *locType,
@@ -79,35 +109,14 @@ static std::pair<Location, IdString> parse_trellis_wirename(
     if (relname.size() == 0)
         return {};
 
-    char direction = relname[0];
-    std::string basename;
-    char *p_end = const_cast<char*>(relname.c_str()+1);
-    int distance = std::strtol(relname.c_str()+1, &p_end, 10);
-    if (*p_end == '_' && (direction == 'N' || direction == 'E' || direction == 'S' || direction == 'W'))
-        basename = std::string(p_end+1, &*relname.end());
-    else {
-        basename = relname;
-        direction = 'X';
-        distance = 0;
-    }
+    auto [offset, loc] = parse_direction(relname.data());
+    std::string basename = relname.substr(offset, relname.size()-offset);
 
-    Location loc;
-    loc.x = 0;
-    loc.y = 0;
-    if (direction == 'N')
-        loc.y = -distance;
-    else if (direction == 'E')
-        loc.x = distance;
-    else if (direction == 'S')
-        loc.y = distance;
-    else if (direction == 'W')
-        loc.x = -distance;
-
-    printf("split %s to %c %d %s\n",
+    /*printf("split %s to %c %d %s\n",
         relname.c_str(),
         direction,
         distance,
-        basename.c_str());
+        basename.c_str());*/
 
     return {loc, ctx->id(basename)};
 }
@@ -497,7 +506,8 @@ void fix_tile_names(Context *ctx, ChipConfig &cc, bool reverse)
                 } else if (newname.at(cibdcu - 1) == 'V') {
                     newname.resize(newname.size()-1);
                 }
-                tiletype_xform[tile.first] = newname;
+                if (tile.first != newname)
+                    tiletype_xform[tile.first] = newname;
             } else if (boost::ends_with(tile.first, "BMID_0H") && reverse == false) {
                 newname.back() = 'V';
                 tiletype_xform[tile.first] = newname;
@@ -636,7 +646,7 @@ void read_bitstream(Context *ctx, std::string text_config_file)
     ChipInfoPOD const *chip_info = ctx->chip_info;
 
     std::unordered_map<std::string, Location> reverseLoc;
-    std::unordered_map<std::string, IdString> tileType;
+    std::unordered_map<std::string, IdString> tileTypes;
 
     for (int16_t col = 0; col < chip_info->width; col++)
         for (int16_t row = 0; row < chip_info->height; row++)
@@ -647,7 +657,7 @@ void read_bitstream(Context *ctx, std::string text_config_file)
                 reverseLoc[tileloc.tile_names[i].name.get()] = {col, row};
             }
             for (int i = 0; i < tileloc.num_tiles; i++) {
-                tileType[tileloc.tile_names[i].name.get()] = 
+                tileTypes[tileloc.tile_names[i].name.get()] = 
                     ctx->id(chip_info->tiletype_names[tileloc.tile_names[i].type_idx].get());
             }
         }
@@ -665,9 +675,6 @@ void read_bitstream(Context *ctx, std::string text_config_file)
 
     // Restore tile names
     fix_tile_names(ctx, cc, true);
-
-    auto id_TRELLIS_SLICE = ctx->id("TRELLIS_SLICE");
-    auto id_PLC2 = ctx->id("PLC2");
 
     int ii = -1;
 
@@ -710,6 +717,8 @@ void read_bitstream(Context *ctx, std::string text_config_file)
         Location loc,
         IdString port_name
     ) -> std::pair<Location, int32_t> {
+        if (loc.x < 0 || loc.y < 0 || loc.x >= chip_info->width || loc.y >= chip_info->height)
+            return {Location(), -2};
         const LocationTypePOD* locType;
         {
             PipId pip; // dummy object for passing to locInfo
@@ -828,6 +837,7 @@ void read_bitstream(Context *ctx, std::string text_config_file)
 
     std::vector<std::tuple<WireId, PipId, WireId>> arcs;
     for (auto &tnametile: cc.tiles) {
+        printf("tile: %s\n", tnametile.first.c_str());
         Location loc = reverseLoc[tnametile.first];
         for (auto &arc: tnametile.second.carcs)
         {
@@ -928,6 +938,7 @@ void read_bitstream(Context *ctx, std::string text_config_file)
 
             net = ctx->createNet(
                 ctx->getWireName(wireId));
+            ctx->bindWire(wireId, net, PlaceStrength::STRENGTH_WEAK);
             unclaimedNets.insert(net);
         } else {
             auto prevWire = it->second.first;
@@ -975,13 +986,27 @@ void read_bitstream(Context *ctx, std::string text_config_file)
     }
 
 
+    auto id_TRELLIS_SLICE = ctx->id("TRELLIS_SLICE");
+    auto id_PLC2 = ctx->id("PLC2");
+    auto id_DCUA = ctx->id("DCUA");
+    auto id_DCU0 = ctx->id("DCU0");
+    auto id_EXTREFB = ctx->id("EXTREFB");
+
     for (auto &tnametile : cc.tiles) {
         ii++;
         Location loc = reverseLoc[tnametile.first];
-        IdString type = tileType[tnametile.first];
+        IdString tileType = tileTypes[tnametile.first];
 
-        if (type != id_PLC2)
+        IdString wantBel;
+
+        if (tileType == id_PLC2)
+            wantBel = id_TRELLIS_SLICE;
+        else if (tileType == id_DCU0)
+            wantBel = id_DCUA;
+        else {
+            log_warning("unhandled tile type: %s\n", tileType.c_str(ctx));
             continue;
+        }
 
         //auto &tile = tnametile.second;
         // if (ii < 400)
@@ -1007,100 +1032,128 @@ void read_bitstream(Context *ctx, std::string text_config_file)
 
             IdString belType = ctx->getBelType(bel);
 
-            // log_info("    %d: %s\n", i, belType.c_str(ctx));
+            log_info("    %d: %s\n", i, belType.c_str(ctx));
 
 
-            if (belType == id_TRELLIS_SLICE) {
+            if (belType != wantBel && belType != id_EXTREFB)
+                continue;
 
-                // IdString cellType = belType; // ???
+            // IdString cellType = belType; // ???
 
-                std::string slice = belData[i].name.get();
+            std::string slice = belData[i].name.get();
 
-                int connectedPins = 0;
-                int unconnectedPins = 0;
+            int connectedPins = 0;
+            int unconnectedPins = 0;
 
-                for (auto port_name: ctx->getBelPins(bel)) {
-                    auto it = belPinNets.find({bel, port_name});
-                    if (it == belPinNets.end())
-                        unconnectedPins++;
-                    else
-                        connectedPins++;
-                }
+            for (auto port_name: ctx->getBelPins(bel)) {
+                auto it = belPinNets.find({bel, port_name});
+                if (it == belPinNets.end())
+                    unconnectedPins++;
+                else
+                    connectedPins++;
+            }
 
-                log_info("for cell %s %d/%d ports are connected to a net\n",
-                    //cell->name.c_str(ctx),
-                    "<todo>",
+            if (connectedPins == 0 && belType == id_TRELLIS_SLICE)
+            {
+                log_info("for bel %s %d/%d ports are connected to a net\n",
+                    ctx->getBelName(bel).c_str(ctx),
                     connectedPins,
                     connectedPins + unconnectedPins
                 );
 
-                if (connectedPins == 0)
-                    continue;
+                continue;
+            }
 
-                CellInfo *cell;
+            CellInfo *cell;
 
-                {
+            {
+                if (wantBel == id_TRELLIS_SLICE) {
                     std::unique_ptr<CellInfo> ucell = create_ecp5_cell(ctx, id_TRELLIS_SLICE, "");
                     cell = ucell.get();
                     ctx->cells[cell->name] = std::move(ucell);
+                } else {
+                    static int auto_idx = 0;
+                    std::unique_ptr<CellInfo> new_cell = std::unique_ptr<CellInfo>(new CellInfo());
+                    new_cell->name = ctx->id("$loadconfig_" + belType.str(ctx) + "_" + std::to_string(auto_idx++));
+                    new_cell->type = belType;
+
+                    cell = new_cell.get();
+                    for (auto port : ctx->getBelPins(bel))
+                        cell->ports[port] = PortInfo{port, nullptr, ctx->getBelPinType(bel, port)};
+
+                    ctx->cells[cell->name] = std::move(new_cell);
                 }
-
-                int idx = ctx->getBelFlatIndex(bel);
-                if (ctx->bel_to_cell.at(idx) == nullptr)
-                    ctx->bindBel(bel, cell, STRENGTH_WEAK);
-                else
-                    log_warning("      already occupied\n");
-
-
-                for (auto port_name: ctx->getBelPins(bel)) {
-                    // no idea how CellInfo.pins gets initialized but considering the fallthrough is
-                    // cell port name = bel pin name, just use that
-
-                    auto it = belPinNets.find({bel, port_name});
-                    if (it == belPinNets.end()) {
-                        // log_info(" querying belPinNets[{%s, %s}] = <nothing>\n",
-                        //     ctx->getBelName(bel).c_str(ctx),
-                        //     port_name.c_str(ctx));
-                        continue;
-
-                    } else {
-                        // log_info(" querying belPinNets[{%s, %s}] = %s\n",
-                        //         ctx->getBelName(bel).c_str(ctx),
-                        //         port_name.c_str(ctx),
-                        //         it->second->name.c_str(ctx));
-                    }
-
-                    if (auto it2 = unclaimedNets.find(it->second); it2 != unclaimedNets.end())
-                        unclaimedNets.erase(it2);
-
-                    connect_port(ctx, it->second, cell, port_name);
-                }
-
-
-                /*
-                std::string tname = ctx->getTileByTypeAndLocation(bel.location.y, bel.location.x, "PLC2");
-                std::string slice = ctx->locInfo(bel)->bel_data[bel.index].name.get();
-                int lut0_init = int_or_default(ci->params, ctx->id("LUT0_INITVAL"));
-                int lut1_init = int_or_default(ci->params, ctx->id("LUT1_INITVAL"));
-                cc.tiles[tname].add_word(slice + ".K0.INIT", int_to_bitvector(lut0_init, 16));
-                cc.tiles[tname].add_word(slice + ".K1.INIT", int_to_bitvector(lut1_init, 16));
-                cc.tiles[tname].add_enum(slice + ".MODE", str_or_default(ci->params, ctx->id("MODE"), "LOGIC"));
-                cc.tiles[tname].add_enum(slice + ".GSR", str_or_default(ci->params, ctx->id("GSR"), "ENABLED"));
-                cc.tiles[tname].add_enum(slice + ".REG0.SD", intstr_or_default(ci->params, ctx->id("REG0_SD"), "0"));
-                cc.tiles[tname].add_enum(slice + ".REG1.SD", intstr_or_default(ci->params, ctx->id("REG1_SD"), "0"));
-                cc.tiles[tname].add_enum(slice + ".REG0.REGSET",
-                                         str_or_default(ci->params, ctx->id("REG0_REGSET"), "RESET"));
-                cc.tiles[tname].add_enum(slice + ".REG1.REGSET",
-                                         str_or_default(ci->params, ctx->id("REG1_REGSET"), "RESET"));
-                cc.tiles[tname].add_enum(slice + ".CEMUX", str_or_default(ci->params, ctx->id("CEMUX"), "1"));
-                */
             }
+
+            int idx = ctx->getBelFlatIndex(bel);
+            if (ctx->bel_to_cell.at(idx) == nullptr)
+                ctx->bindBel(bel, cell, STRENGTH_WEAK);
+            else
+                log_warning("      already occupied\n");
+
+
+            bool logBelPinNetQueries = belType != id_TRELLIS_SLICE;
+
+            for (auto port_name: ctx->getBelPins(bel)) {
+                // no idea how CellInfo.pins gets initialized but considering the fallthrough is
+                // cell port name = bel pin name, just use that
+
+                WireId belPinWire = ctx->getBelPinWire(bel, port_name); // useless loop
+                netForWire(belPinWire);
+
+                auto it = belPinNets.find({bel, port_name});
+                if (it == belPinNets.end()) {
+                    if (logBelPinNetQueries)
+                        log_info(" querying belPinNets[{%s, %s}] = <nothing>\n",
+                            ctx->getBelName(bel).c_str(ctx),
+                            port_name.c_str(ctx));
+                    continue;
+
+                } else {
+                    if (logBelPinNetQueries)
+                        log_info(" querying belPinNets[{%s, %s}] = %s\n",
+                                ctx->getBelName(bel).c_str(ctx),
+                                port_name.c_str(ctx),
+                                it->second->name.c_str(ctx));
+                }
+                auto it2 = unclaimedNets.find(it->second);
+                if (it2 != unclaimedNets.end())
+                    unclaimedNets.erase(it2);
+
+                connect_port(ctx, it->second, cell, port_name);
+            }
+
+            log_info("for cell %s %d/%d ports are connected to a net\n",
+                cell->name.c_str(ctx),
+                connectedPins,
+                connectedPins + unconnectedPins
+            );
+
+            /*
+            std::string tname = ctx->getTileByTypeAndLocation(bel.location.y, bel.location.x, "PLC2");
+            std::string slice = ctx->locInfo(bel)->bel_data[bel.index].name.get();
+            int lut0_init = int_or_default(ci->params, ctx->id("LUT0_INITVAL"));
+            int lut1_init = int_or_default(ci->params, ctx->id("LUT1_INITVAL"));
+            cc.tiles[tname].add_word(slice + ".K0.INIT", int_to_bitvector(lut0_init, 16));
+            cc.tiles[tname].add_word(slice + ".K1.INIT", int_to_bitvector(lut1_init, 16));
+            cc.tiles[tname].add_enum(slice + ".MODE", str_or_default(ci->params, ctx->id("MODE"), "LOGIC"));
+            cc.tiles[tname].add_enum(slice + ".GSR", str_or_default(ci->params, ctx->id("GSR"), "ENABLED"));
+            cc.tiles[tname].add_enum(slice + ".REG0.SD", intstr_or_default(ci->params, ctx->id("REG0_SD"), "0"));
+            cc.tiles[tname].add_enum(slice + ".REG1.SD", intstr_or_default(ci->params, ctx->id("REG1_SD"), "0"));
+            cc.tiles[tname].add_enum(slice + ".REG0.REGSET",
+                                     str_or_default(ci->params, ctx->id("REG0_REGSET"), "RESET"));
+            cc.tiles[tname].add_enum(slice + ".REG1.REGSET",
+                                     str_or_default(ci->params, ctx->id("REG1_REGSET"), "RESET"));
+            cc.tiles[tname].add_enum(slice + ".CEMUX", str_or_default(ci->params, ctx->id("CEMUX"), "1"));
+            */
         }
     }
 
     for (auto net : unclaimedNets) {
         log_warning("no bel connected to net %s\n",
             net->name.c_str(ctx));
+        ctx->ripupNet(net->name);
+        //ctx->nets.erase(net->name);
     }
 }
 
